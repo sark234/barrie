@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Neon Cat's Cradle</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #03081d;
+      --panel: rgba(8, 16, 38, 0.68);
+      --text: #d6e6ff;
+      --accent: #2ef3ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at 50% 25%, #12265a 0%, #060f2f 40%, #020618 100%);
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+    main {
+      position: relative;
+      width: min(96vw, 1100px);
+      aspect-ratio: 16/9;
+      border: 1px solid rgba(171, 220, 255, 0.24);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 0 0 1px rgba(255,255,255,.05) inset, 0 35px 80px rgba(0,0,0,.58), 0 0 56px rgba(43, 209, 255, .16);
+      background: #020818;
+    }
+    #canvas-wrap, .scanlines {
+      position: absolute;
+      inset: 0;
+    }
+    .scanlines {
+      pointer-events: none;
+      z-index: 8;
+      background: repeating-linear-gradient(to bottom, rgba(255,255,255,.02) 0px, rgba(255,255,255,.02) 1px, rgba(0,0,0,0) 2px, rgba(0,0,0,0) 4px);
+      mix-blend-mode: screen;
+      opacity: 0.35;
+    }
+    .hud {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 20;
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 10px;
+      padding: 10px 14px;
+      backdrop-filter: blur(8px);
+      pointer-events: none;
+    }
+    .hud strong { color: var(--accent); }
+    #status { font-size: .88rem; margin-top: 2px; opacity: .92; }
+    .controls {
+      position: absolute;
+      right: 12px;
+      top: 12px;
+      z-index: 21;
+      width: 235px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.16);
+      background: var(--panel);
+      backdrop-filter: blur(8px);
+      font-size: 12px;
+    }
+    .controls label { display:block; margin-top: 8px; }
+    .controls .row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .controls input[type='range'] { width: 130px; }
+    .controls input[type='checkbox'] { accent-color: #2ef3ff; }
+    video { display: none; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+</head>
+<body>
+  <main>
+    <div id="canvas-wrap"></div>
+    <div class="scanlines"></div>
+    <div class="hud">
+      <strong>Neon Cat's Cradle</strong>
+      <div id="status">Awaiting camera permission…</div>
+    </div>
+    <div class="controls">
+      <div class="row"><span>Mirror</span><input id="mirrorToggle" type="checkbox" checked></div>
+      <label class="row"><span>Glow</span><input id="glowSlider" type="range" min="8" max="40" value="24"></label>
+      <label class="row"><span>Sensitivity</span><input id="touchSlider" type="range" min="12" max="45" value="24"></label>
+      <label class="row"><span>Particles</span><input id="particleSlider" type="range" min="8" max="42" value="28"></label>
+    </div>
+    <video id="input-video" playsinline></video>
+  </main>
+  <script>
+    const statusEl = document.getElementById('status');
+    const videoEl = document.getElementById('input-video');
+    const wrap = document.getElementById('canvas-wrap');
+    const mirrorToggle = document.getElementById('mirrorToggle');
+    const glowSlider = document.getElementById('glowSlider');
+    const touchSlider = document.getElementById('touchSlider');
+    const particleSlider = document.getElementById('particleSlider');
+
+    const fingerTips = [4, 8, 12, 16, 20];
+    const leftTips = new Array(5).fill(null);
+    const rightTips = new Array(5).fill(null);
+    const allHands = { left: null, right: null };
+    const particles = [];
+    const touchCooldown = new Array(5).fill(0);
+    const smoothTips = { left: new Array(5).fill(null), right: new Array(5).fill(null) };
+
+    let latestFrame = null;
+    let frameW = 1280;
+    let frameH = 720;
+
+    function toCanvasPoint(lm, width, height) {
+      const mx = mirrorToggle.checked ? (1 - lm.x) : lm.x;
+      return { x: mx * width, y: lm.y * height, z: lm.z };
+    }
+
+    function updateHands(results, width, height) {
+      allHands.left = null;
+      allHands.right = null;
+      if (!results.multiHandLandmarks || !results.multiHandedness) return;
+
+      for (let i = 0; i < results.multiHandLandmarks.length; i += 1) {
+        const handKey = results.multiHandedness[i].label.toLowerCase();
+        allHands[handKey] = results.multiHandLandmarks[i].map((lm) => toCanvasPoint(lm, width, height));
+      }
+      for (let i = 0; i < fingerTips.length; i += 1) {
+        leftTips[i] = allHands.left ? allHands.left[fingerTips[i]] : null;
+        rightTips[i] = allHands.right ? allHands.right[fingerTips[i]] : null;
+      }
+    }
+
+    const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+    hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.65, minTrackingConfidence: 0.6 });
+    hands.onResults((results) => {
+      latestFrame = results.image;
+      frameW = results.image.width;
+      frameH = results.image.height;
+      updateHands(results, frameW, frameH);
+    });
+
+    async function startCamera() {
+      try {
+        statusEl.textContent = 'Starting hand tracking…';
+        const camera = new Camera(videoEl, {
+          onFrame: async () => { await hands.send({ image: videoEl }); },
+          width: 1280,
+          height: 720
+        });
+        await camera.start();
+        statusEl.textContent = 'Bring fingertips together to trigger bursts.';
+      } catch (e) {
+        console.error(e);
+        statusEl.textContent = 'Camera permission denied or unavailable.';
+      }
+    }
+
+    function setup() {
+      const c = createCanvas(wrap.clientWidth, wrap.clientHeight);
+      c.parent('canvas-wrap');
+      pixelDensity(1);
+      noStroke();
+      startCamera();
+    }
+    function windowResized() { resizeCanvas(wrap.clientWidth, wrap.clientHeight); }
+
+
+    function smoothPoint(prev, next, alpha = 0.34) {
+      if (!next) return null;
+      if (!prev) return { ...next };
+      return {
+        x: prev.x + (next.x - prev.x) * alpha,
+        y: prev.y + (next.y - prev.y) * alpha,
+        z: prev.z + (next.z - prev.z) * alpha
+      };
+    }
+
+    function updateSmoothedTips() {
+      for (let i = 0; i < fingerTips.length; i += 1) {
+        smoothTips.left[i] = smoothPoint(smoothTips.left[i], leftTips[i]);
+        smoothTips.right[i] = smoothPoint(smoothTips.right[i], rightTips[i]);
+      }
+    }
+
+    function drawBackgroundAndSilhouette() {
+      background(4, 12, 36);
+      if (!latestFrame) return;
+
+      // Hand silhouettes only (hide raw feed)
+      push();
+      fill(18, 60, 130, 70);
+      noStroke();
+      ['left', 'right'].forEach((k) => {
+        const hand = allHands[k];
+        if (!hand) return;
+        drawingContext.shadowBlur = 18;
+        drawingContext.shadowColor = 'rgba(38,150,255,0.55)';
+        beginShape();
+        for (let i = 0; i < hand.length; i += 1) {
+          const p = hand[i];
+          curveVertex(p.x * (width / frameW), p.y * (height / frameH));
+        }
+        endShape(CLOSE);
+      });
+      pop();
+      drawingContext.shadowBlur = 0;
+    }
+
+    function drawLandmarks(hand, hueShift = 0) {
+      if (!hand) return;
+      for (let i = 0; i < hand.length; i += 1) {
+        const p = hand[i];
+        const x = p.x * (width / frameW);
+        const y = p.y * (height / frameH);
+        const depth = constrain(map(p.z, -0.18, 0.12, 1.45, 0.62), 0.58, 1.45);
+        const r = 3.3 * depth;
+        const c = color((190 + hueShift) % 255, 245, 255, 230);
+        drawingContext.shadowBlur = 16;
+        drawingContext.shadowColor = `rgba(${red(c)},${green(c)},${blue(c)},0.95)`;
+        fill(c);
+        circle(x, y, r * 2);
+      }
+      drawingContext.shadowBlur = 0;
+    }
+
+    function spawnBurst(x, y, colA, colB) {
+      const count = Number(particleSlider.value);
+      for (let i = 0; i < count; i += 1) {
+        const angle = random(TWO_PI);
+        const speed = random(1.2, 4.4);
+        particles.push({
+          x, y,
+          vx: cos(angle) * speed,
+          vy: sin(angle) * speed,
+          life: random(20, 36),
+          size: random(1.8, 4.1),
+          color: random() > 0.5 ? colA : colB
+        });
+      }
+    }
+
+    function drawParticles() {
+      for (let i = particles.length - 1; i >= 0; i -= 1) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.97;
+        p.vy *= 0.97;
+        p.life -= 1;
+        if (p.life <= 0) {
+          particles.splice(i, 1);
+          continue;
+        }
+        const a = map(p.life, 0, 36, 0, 220);
+        const c = color(p.color);
+        drawingContext.shadowBlur = 14;
+        drawingContext.shadowColor = `rgba(${red(c)},${green(c)},${blue(c)},0.85)`;
+        fill(red(c), green(c), blue(c), a);
+        circle(p.x, p.y, p.size);
+      }
+      drawingContext.shadowBlur = 0;
+    }
+
+    function drawString(l, r, idx) {
+      if (!l || !r) return;
+      const sx = l.x * (width / frameW), sy = l.y * (height / frameH);
+      const ex = r.x * (width / frameW), ey = r.y * (height / frameH);
+      const d = dist(sx, sy, ex, ey);
+      const t = constrain(d / (width * 0.58), 0, 1);
+      const thickness = lerp(4.4, 1.6, t);
+
+      const palette = [
+        ['#18f7ff', '#fb4dff'],
+        ['#fb4dff', '#f8ff3f'],
+        ['#18f7ff', '#f8ff3f'],
+        ['#4cd8ff', '#ff45ed'],
+        ['#2be8ff', '#ffe24a']
+      ];
+      const [c0, c1] = palette[idx % palette.length];
+      const grad = drawingContext.createLinearGradient(sx, sy, ex, ey);
+      grad.addColorStop(0, c0);
+      grad.addColorStop(0.5, '#fffce8');
+      grad.addColorStop(1, c1);
+
+      const mx = (sx + ex) * 0.5;
+      const my = (sy + ey) * 0.5 - (16 * (1 - t));
+
+      // Outer glow beam
+      drawingContext.save();
+      drawingContext.strokeStyle = grad;
+      drawingContext.lineWidth = thickness + 3.4;
+      drawingContext.globalAlpha = 0.35;
+      drawingContext.shadowBlur = Number(glowSlider.value);
+      drawingContext.shadowColor = c0;
+      drawingContext.beginPath();
+      drawingContext.moveTo(sx, sy);
+      drawingContext.quadraticCurveTo(mx, my, ex, ey);
+      drawingContext.stroke();
+      drawingContext.restore();
+
+      // Core laser beam
+      drawingContext.save();
+      drawingContext.strokeStyle = grad;
+      drawingContext.lineWidth = thickness + sin(frameCount * 0.15 + idx) * 0.28;
+      drawingContext.shadowBlur = 12;
+      drawingContext.shadowColor = c1;
+      drawingContext.beginPath();
+      drawingContext.moveTo(sx, sy);
+      drawingContext.quadraticCurveTo(mx, my, ex, ey);
+      drawingContext.stroke();
+      drawingContext.restore();
+
+      const touchThreshold = Number(touchSlider.value);
+      if (d < touchThreshold && touchCooldown[idx] <= 0) {
+        spawnBurst((sx + ex) * 0.5, (sy + ey) * 0.5, c0, c1);
+        touchCooldown[idx] = 12;
+      }
+      if (touchCooldown[idx] > 0) touchCooldown[idx] -= 1;
+    }
+
+    function draw() {
+      drawBackgroundAndSilhouette();
+      updateSmoothedTips();
+      for (let i = 0; i < fingerTips.length; i += 1) drawString(smoothTips.left[i], smoothTips.right[i], i);
+      drawParticles();
+      drawLandmarks(allHands.left, 0);
+      drawLandmarks(allHands.right, 35);
+    }
+  </script>
+</body>
+</html>
